@@ -6,6 +6,13 @@ from pgmpy.factors import Factor
 from pgmpy.factors.Factor import factor_product
 from pgmpy.inference import Inference, BeliefPropagation
 
+# Inference in Dynamic Bayesian Network uses the interface algorithm
+# which is adapted from the following paper:-
+# Kevin Patrick Murphy.
+# Dynamic Bayesian Networks: Representation, Inference and
+# Learning.
+# PhD thesis, University of California Berkeley, 2002.
+
 
 class DBNInference(Inference):
 
@@ -72,7 +79,7 @@ class DBNInference(Inference):
         self.in_clique = self._get_clique(self.one_and_half_junction_tree, self.interface_nodes_0)
         self.out_clique = self._get_clique(self.one_and_half_junction_tree, self.interface_nodes_1)
 
-    def _shift_nodes(self, nodes, time):
+    def _shift_nodes(self, nodes, time_slice):
         """
         Shifting the nodes to a certain required timeslice.
 
@@ -85,7 +92,7 @@ class DBNInference(Inference):
         shift: int
             time slice where to shift the nodes.
         """
-        return [(node[0], time) for node in nodes]
+        return [(node[0], time_slice) for node in nodes]
 
     def _get_clique(self, junction_tree, nodes):
         """
@@ -103,7 +110,7 @@ class DBNInference(Inference):
 
         return [clique for clique in junction_tree.nodes() if set(nodes).issubset(clique)][0]
 
-    def _get_evidence(self, evidence_dict, time, shift):
+    def _get_evidence(self, evidence_dict, time_slice, shift):
         """
         Getting the evidence belonging to a particular timeslice.
 
@@ -120,7 +127,7 @@ class DBNInference(Inference):
             shifting the evidence corresponding to the given time slice.
         """
         if evidence_dict:
-            return {(node[0], shift): evidence_dict[node] for node in evidence_dict if node[1] == time}
+            return {(node[0], shift): evidence_dict[node] for node in evidence_dict if node[1] == time_slice}
 
     def _marginalize_factor(self, nodes, factor):
         """
@@ -177,11 +184,11 @@ class DBNInference(Inference):
         evidence: dict
             a dict key, value pair as {var: state_of_var_observed}
         """
-        final_factor = factor_product(*belief_prop.junction_tree.get_factors())
+        final_factor = factor_product(*belief_prop.junction_tree.get_factors()).copy()
         if evidence:
             for var in evidence:
                 if var in final_factor.scope():
-                    final_factor.reduce((var, evidence[var]))
+                    final_factor.reduce([(var, evidence[var])])
         return final_factor
 
     def _shift_factor(self, factor, shift):
@@ -247,7 +254,7 @@ class DBNInference(Inference):
 
         time_range = max(variable_dict)
         if evidence:
-            evid_time_range = max([time for var, time in evidence.keys()])
+            evid_time_range = max([time_slice for var, time_slice in evidence.keys()])
             time_range = max(time_range, evid_time_range)
 
         start_bp = BeliefPropagation(self.start_junction_tree)
@@ -268,17 +275,17 @@ class DBNInference(Inference):
         else:
             factor_values = {}
 
-        for time in range(1, time_range + 1):
-            evidence_time = self._get_evidence(evidence, time, 1)
+        for time_slice in range(1, time_range + 1):
+            evidence_time = self._get_evidence(evidence, time_slice, 1)
             if interface_nodes_dict:
                 evidence_time.update(interface_nodes_dict)
 
-            if variable_dict[time]:
-                variable_time = self._shift_nodes(variable_dict[time], 1)
+            if variable_dict[time_slice]:
+                variable_time = self._shift_nodes(variable_dict[time_slice], 1)
                 new_values = mid_bp.query(variable_time, evidence=evidence_time)
                 changed_values = {}
                 for key in new_values.keys():
-                    new_key = (key[0], time)
+                    new_key = (key[0], time_slice)
                     new_factor = Factor([new_key], new_values[key].cardinality, new_values[key].values)
                     changed_values[new_key] = new_factor
                 factor_values.update(changed_values)
@@ -286,7 +293,7 @@ class DBNInference(Inference):
             clique_phi = self._get_factor(mid_bp, evidence_time)
             out_clique_phi = self._marginalize_factor(self.interface_nodes_1, clique_phi)
             new_factor = self._shift_factor(out_clique_phi, 0)
-            potential_dict[time] = new_factor
+            potential_dict[time_slice] = new_factor
             mid_bp = BeliefPropagation(self.one_and_half_junction_tree)
             self._update_belief(mid_bp, self.in_clique, new_factor)
 
@@ -318,14 +325,23 @@ class DBNInference(Inference):
         >>> from pgmpy.models import DynamicBayesianNetwork as dbn
         >>> from pgmpy.inference import DBNInference
         >>> dbnet = dbn()
-        >>> grade_cpd = TabularCPD(('G',0),3, [[0.3, 0.05, 0.9, 0.5],
-                                               [0.4, 0.25, 0.08, 0.3],
-                                               [0.3, 0.7, 0.2, 0.2]],[('D',0),('I',0)],[2,2])
-        >>> d_i_cpd = TabularCPD(('D',1),2,[[0.6,0.3],[0.4,0.7]],[('D',0)],2)
-        >>> diff_cpd = TabularCPD(('D',0),2,[[0.6,0.4]])
-        >>> intel_cpd = TabularCPD(('I',0),2,[[0.7,0.3]])
-        >>> i_i_cpd = TabularCPD(('I',1),2,[[0.5,0.4],[0.5,0.6]],[('I',0)],2)
-        >>> dbnet.add_edges_from([(('D', 0), ('D', 1)), (('I', 0), ('I', 1)), (('D',1),('G',1)), (('I',1), ('G',1))])
+        >>> grade_cpd = TabularCPD(('G', 0), 3, [[0.3, 0.05, 0.9, 0.5],
+        ...                                      [0.4, 0.25, 0.08, 0.3],
+        ...                                      [0.3, 0.7, 0.2, 0.2]],
+        ...                        evidence=[('D', 0),('I', 0)],
+        ...                        evidence_card=[2, 2])
+        >>> d_i_cpd = TabularCPD(('D', 1), 2, [[0.6, 0.3],
+        ...                                    [0.4, 0.7]],
+        ...                      evidence=[('D', 0)],
+        ...                      evidence_card=2)
+        >>> diff_cpd = TabularCPD(('D', 0), 2,[[0.6, 0.4]])
+        >>> intel_cpd = TabularCPD(('I', 0), 2,[[0.7, 0.3]])
+        >>> i_i_cpd = TabularCPD(('I', 1), 2, [[0.5, 0.4],
+        ...                                    [0.5, 0.6]],
+        ...                      evidence=[('I', 0)],
+        ...                      evidence_card=2)
+        >>> dbnet.add_edges_from([(('D', 0), ('D', 1)), (('I', 0), ('I', 1)),
+        ...                       (('D', 1), ('G', 1)), (('I', 1), ('G', 1))])
         >>> dbnet.add_cpds(grade_cpd, d_i_cpd, diff_cpd, intel_cpd, i_i_cpd)
         >>> dbnet.initialize_initial_state()
         >>> dbn_inf = DBNInference(dbnet)
@@ -338,31 +354,31 @@ class DBNInference(Inference):
         time_range = max(variable_dict)
         interface_nodes_dict = {}
         if evidence:
-            evid_time_range = max([time for var, time in evidence.keys()])
+            evid_time_range = max([time_slice for var, time_slice in evidence.keys()])
             time_range = max(time_range, evid_time_range)
         end_bp = BeliefPropagation(self.start_junction_tree)
         potential_dict = self.forward_inference(variables, evidence, 'potential')
         update_factor = self._shift_factor(potential_dict[time_range], 1)
         factor_values = {}
 
-        for time in range(time_range, 0, -1):
-            evidence_time = self._get_evidence(evidence, time, 1)
-            evidence_prev_time = self._get_evidence(evidence, time - 1, 0)
+        for time_slice in range(time_range, 0, -1):
+            evidence_time = self._get_evidence(evidence, time_slice, 1)
+            evidence_prev_time = self._get_evidence(evidence, time_slice - 1, 0)
             if evidence_prev_time:
                 interface_nodes_dict = {k: v for k, v in evidence_prev_time.items() if k in self.interface_nodes_0}
             if evidence_time:
                 evidence_time.update(interface_nodes_dict)
             mid_bp = BeliefPropagation(self.one_and_half_junction_tree)
-            self._update_belief(mid_bp, self.in_clique, potential_dict[time - 1])
-            forward_factor = self._shift_factor(potential_dict[time], 1)
+            self._update_belief(mid_bp, self.in_clique, potential_dict[time_slice - 1])
+            forward_factor = self._shift_factor(potential_dict[time_slice], 1)
             self._update_belief(mid_bp, self.out_clique, forward_factor, update_factor)
 
-            if variable_dict[time]:
-                variable_time = self._shift_nodes(variable_dict[time], 1)
+            if variable_dict[time_slice]:
+                variable_time = self._shift_nodes(variable_dict[time_slice], 1)
                 new_values = mid_bp.query(variable_time, evidence=evidence_time)
                 changed_values = {}
                 for key in new_values.keys():
-                    new_key = (key[0], time)
+                    new_key = (key[0], time_slice)
                     new_factor = Factor([new_key], new_values[key].cardinality, new_values[key].values)
                     changed_values[new_key] = new_factor
                 factor_values.update(changed_values)
@@ -422,3 +438,6 @@ class DBNInference(Inference):
         """
         if args == 'exact':
             return self.backward_inference(variables, evidence)
+if __name__ == '__main__':
+	import doctest
+	doctest.testmod()
